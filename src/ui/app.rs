@@ -45,6 +45,8 @@ pub struct Patina {
     /// The custom instructions field in Settings; edits are saved as they happen.
     pub(super) instructions: Entity<TextareaState>,
     focus_handle: FocusHandle,
+    /// The sign-in screen's only action, focused so Return starts it.
+    pub(super) sign_in_button: FocusHandle,
     models_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -54,7 +56,11 @@ pub(super) struct SignIn {
     /// Set while the browser flow runs; storing `true` ends it.
     pub(super) cancel: Option<Arc<AtomicBool>>,
     pub(super) error: Option<SharedString>,
+    /// Shown above the button; present when the screen appears.
     pub(super) notice: Option<SharedString>,
+    /// Arrives while the screen is up (the revoke result), so it takes the slot under the
+    /// button instead of pushing the stack around.
+    pub(super) late_notice: Option<SharedString>,
     task: Option<Task<()>>,
 }
 
@@ -101,24 +107,52 @@ enum Failure {
     Other(String),
 }
 
+const OFFLINE: &str = "Couldn't reach ChatGPT. Check your connection and try again.";
+
+/// The raw detail of a failure goes to the log; the user gets what happened and what to do.
+fn log(detail: impl std::fmt::Display) {
+    eprintln!("{APP_NAME}: {detail}");
+}
+
+/// What the sign-in screen says when the browser flow fails.
+pub(super) fn sign_in_message(e: &AuthError) -> &'static str {
+    log(e);
+    match e {
+        AuthError::Network(_) => OFFLINE,
+        AuthError::Denied => "Access wasn't allowed in ChatGPT. Try again and allow it.",
+        _ => "Sign-in didn't finish. Try again.",
+    }
+}
+
 impl From<AuthError> for Failure {
     fn from(e: AuthError) -> Self {
-        match e {
-            AuthError::SignInRequired => Failure::SignIn,
-            e => Failure::Other(e.to_string()),
+        if e == AuthError::SignInRequired {
+            return Failure::SignIn;
         }
+        log(&e);
+        Failure::Other(match e {
+            AuthError::Network(_) => OFFLINE.into(),
+            _ => "Couldn't refresh your ChatGPT session. Try again.".into(),
+        })
     }
 }
 
 impl From<ApiError> for Failure {
     fn from(e: ApiError) -> Self {
         if e.is_auth() {
-            Failure::SignIn
+            return Failure::SignIn;
         } else if e.is_usage_limit() {
-            Failure::UsageLimit
-        } else {
-            Failure::Other(e.message)
+            return Failure::UsageLimit;
         }
+        log(&e);
+        Failure::Other(match (e.status, e.code.as_deref()) {
+            // No HTTP status and no code: the connection failed or dropped mid-reply.
+            (None, None) => OFFLINE.into(),
+            _ if e.is_transient() => {
+                "ChatGPT is unavailable right now. Try again in a moment.".into()
+            }
+            _ => e.message,
+        })
     }
 }
 
@@ -199,6 +233,10 @@ impl ReplyJob {
         })
     }
 }
+
+const SESSION_ENDED: &str = "Your session ended. Sign in again to continue.";
+const REVOKE_UNCONFIRMED: &str =
+    "Signed out. If this Mac was offline, also disconnect Patina in ChatGPT settings.";
 
 /// `PATINA_PREVIEW=1` in a debug build skips sign-in with a fake account, so screens can be
 /// checked without a ChatGPT login. Release builds never take this path.
@@ -319,6 +357,7 @@ impl Patina {
             scroller,
             instructions,
             focus_handle: cx.focus_handle(),
+            sign_in_button: cx.focus_handle(),
             models_task: None,
             _subscriptions: subscriptions,
         };
@@ -332,8 +371,9 @@ impl Patina {
     }
 
     /// Debug preview only: `PATINA_PREVIEW_PROMPT` sends a message on launch,
-    /// `PATINA_PREVIEW_DIALOG` (settings, welcome, usage, about, delete) opens a dialog and
-    /// `PATINA_PREVIEW_SIZE=720x480` resizes the window, so states that need input can be
+    /// `PATINA_PREVIEW_DIALOG` (settings, welcome, usage, about, delete) opens a dialog,
+    /// `PATINA_PREVIEW_SIGNIN` (waiting, error, planoff, ended, revoke) shows a sign-in state
+    /// and `PATINA_PREVIEW_SIZE=720x480` resizes the window, so states that need input can be
     /// checked without a keyboard.
     fn run_preview_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let preview_size = std::env::var("PATINA_PREVIEW_SIZE").ok().and_then(|s| {
@@ -342,6 +382,26 @@ impl Patina {
         });
         if let Some(preview_size) = preview_size {
             window.resize(preview_size);
+        }
+        if let Ok(state) = std::env::var("PATINA_PREVIEW_SIGNIN") {
+            self.account = None;
+            match state.as_str() {
+                "waiting" => self.sign_in.cancel = Some(Arc::default()),
+                "error" => {
+                    let e = AuthError::Network("dns failed: failed to lookup address".into());
+                    self.sign_in.error = Some(sign_in_message(&e).into());
+                }
+                "planoff" => {
+                    self.account = preview_account().map(|a| Account {
+                        plan_usage: false,
+                        ..a
+                    })
+                }
+                "ended" => self.sign_in.notice = Some(SESSION_ENDED.into()),
+                "revoke" => self.sign_in.late_notice = Some(REVOKE_UNCONFIRMED.into()),
+                _ => {}
+            }
+            self.enter(window, cx);
         }
         if let Ok(prompt) = std::env::var("PATINA_PREVIEW_PROMPT") {
             self.input
@@ -371,7 +431,7 @@ impl Patina {
             self.load_models(window, cx);
             self.input.update(cx, |input, cx| input.focus(window, cx));
         } else {
-            self.focus_handle.focus(window, cx);
+            self.sign_in_button.focus(window, cx);
         }
     }
 
@@ -431,7 +491,7 @@ impl Patina {
                 }
             }
             Err(AuthError::Cancelled) => {}
-            Err(e) => self.sign_in.error = Some(e.to_string().into()),
+            Err(e) => self.sign_in.error = Some(sign_in_message(&e).into()),
         }
         cx.notify();
     }
@@ -443,7 +503,7 @@ impl Patina {
         self.models.clear();
         self.models_task = None;
         self.sign_in = SignIn::default();
-        self.focus_handle.focus(window, cx);
+        self.enter(window, cx);
         cx.notify();
         if self.preview {
             return;
@@ -455,10 +515,7 @@ impl Patina {
         cx.spawn(async move |this, cx| {
             if job.await == Some(false) {
                 let _ = this.update(cx, |this, cx| {
-                    this.sign_in.notice.get_or_insert_with(|| {
-                        "Signed out. If this Mac was offline, also disconnect Patina in ChatGPT settings."
-                            .into()
-                    });
+                    this.sign_in.late_notice = Some(REVOKE_UNCONFIRMED.into());
                     cx.notify();
                 });
             }
@@ -468,7 +525,7 @@ impl Patina {
 
     fn session_ended(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sign_out(window, cx);
-        self.sign_in.notice = Some("Your session ended. Sign in again to continue.".into());
+        self.sign_in.notice = Some(SESSION_ENDED.into());
     }
 
     pub(super) fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -657,7 +714,7 @@ impl Patina {
     ) {
         let message = match failure {
             Failure::SignIn if !self.preview => return self.session_ended(window, cx),
-            Failure::SignIn => AuthError::SignInRequired.to_string(),
+            Failure::SignIn => "Sign in again to continue.".into(),
             Failure::UsageLimit => {
                 open_usage_limit(window, cx);
                 // Kept inline too, so the turn can be retried once the limit resets.
@@ -842,7 +899,7 @@ impl Render for Patina {
                             .child(self.render_chat(window, cx)),
                     )
                 } else {
-                    this.child(self.render_sign_in(cx))
+                    this.child(self.render_sign_in(window, cx))
                 }
             })
     }
