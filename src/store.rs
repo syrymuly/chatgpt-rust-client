@@ -273,7 +273,14 @@ mod tests {
             s.save(&chat).unwrap();
         }
         fs::write(s.dir.join("chats/broken.json"), b"{not json").unwrap();
-        fs::write(s.dir.join("chats/x.tmp"), b"{}").unwrap();
+        // A leftover temp file holds a valid chat; it must not show up as a duplicate.
+        let mut tmp = s.load("a").unwrap();
+        tmp.updated_at = 99;
+        fs::write(
+            s.dir.join("chats/a.0123.tmp"),
+            serde_json::to_vec(&tmp).unwrap(),
+        )
+        .unwrap();
         let ids: Vec<_> = s.list().into_iter().map(|c| c.id).collect();
         assert_eq!(ids, ["b", "c", "a"]);
         cleanup(s);
