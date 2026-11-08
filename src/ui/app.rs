@@ -16,7 +16,8 @@ use gpui_kit::component::{ActiveTheme as _, IndexPath, Theme, WindowExt as _, h_
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{NewChat, Stop};
+use super::settings::{open_about, open_usage_limit};
+use super::{About, NewChat, OpenSettings, Stop};
 
 /// The window's root view. Owns the account, local data and every flow that talks to the network.
 pub struct Patina {
@@ -41,6 +42,8 @@ pub struct Patina {
     pub(super) input: Entity<TextareaState>,
     pub(super) model_select: Entity<SelectState<Vec<ModelItem>>>,
     pub(super) scroller: Entity<MessageScrollerState>,
+    /// The custom instructions field in Settings; edits are saved as they happen.
+    pub(super) instructions: Entity<TextareaState>,
     focus_handle: FocusHandle,
     models_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -258,6 +261,13 @@ impl Patina {
         });
         let model_select = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx));
         let scroller = cx.new(|cx| MessageScrollerState::new(chat.messages.len(), cx));
+        let settings = store.settings();
+        let instructions = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(3, 8)
+                .placeholder("For example: answer briefly, I work in Rust.")
+                .default_value(settings.instructions.clone())
+        });
 
         Theme::sync_system_appearance(Some(window), cx);
         let subscriptions =
@@ -283,11 +293,17 @@ impl Patina {
                 ),
                 // The jump-to-latest button follows the scroll position.
                 cx.observe(&scroller, |_, _, cx| cx.notify()),
+                cx.subscribe(&instructions, |this, input, event: &InputEvent, cx| {
+                    if let InputEvent::Change = event {
+                        this.settings.instructions = input.read(cx).value().to_string();
+                        this.save_settings();
+                    }
+                }),
             ];
 
         let mut this = Self {
             auth,
-            settings: store.settings(),
+            settings,
             store,
             account,
             preview: preview.is_some(),
@@ -301,6 +317,7 @@ impl Patina {
             input,
             model_select,
             scroller,
+            instructions,
             focus_handle: cx.focus_handle(),
             models_task: None,
             _subscriptions: subscriptions,
@@ -314,13 +331,25 @@ impl Patina {
         this
     }
 
-    /// Debug preview only: `PATINA_PREVIEW_PROMPT` sends a message on launch, so states that
-    /// need input can be checked without a keyboard.
+    /// Debug preview only: `PATINA_PREVIEW_PROMPT` sends a message on launch and
+    /// `PATINA_PREVIEW_DIALOG` (settings, welcome, usage, about, delete) opens a dialog, so
+    /// states that need input can be checked without a keyboard.
     fn run_preview_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Ok(prompt) = std::env::var("PATINA_PREVIEW_PROMPT") {
             self.input
                 .update(cx, |input, cx| input.set_value(prompt, window, cx));
             self.send(window, cx);
+        }
+        match std::env::var("PATINA_PREVIEW_DIALOG").as_deref() {
+            Ok("settings") => self.open_settings(window, cx),
+            Ok("welcome") => self.open_welcome(window, cx),
+            Ok("usage") => open_usage_limit(window, cx),
+            Ok("about") => open_about(window, cx),
+            Ok("delete") => {
+                let (id, title) = (self.chat.id.clone(), self.chat.title.clone());
+                self.confirm_delete(id, title, window, cx)
+            }
+            _ => {}
         }
     }
 
@@ -389,6 +418,9 @@ impl Patina {
             Ok(account) => {
                 self.account = Some(account);
                 self.enter(window, cx);
+                if self.signed_in() && !self.settings.welcome_seen {
+                    self.open_welcome(window, cx);
+                }
             }
             Err(AuthError::Cancelled) => {}
             Err(e) => self.sign_in.error = Some(e.to_string().into()),
@@ -618,7 +650,11 @@ impl Patina {
         let message = match failure {
             Failure::SignIn if !self.preview => return self.session_ended(window, cx),
             Failure::SignIn => AuthError::SignInRequired.to_string(),
-            Failure::UsageLimit => "Usage limit reached.".into(),
+            Failure::UsageLimit => {
+                open_usage_limit(window, cx);
+                // Kept inline too, so the turn can be retried once the limit resets.
+                "Usage limit reached.".into()
+            }
             Failure::Other(message) => message,
         };
         self.error = Some(TurnError {
@@ -753,6 +789,10 @@ impl Render for Patina {
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.new_chat(window, cx)))
             .on_action(cx.listener(|this, _: &Stop, window, cx| this.finish_reply(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
+            .on_action(|_: &About, window, cx| open_about(window, cx))
             .map(|this| {
                 if self.signed_in() {
                     this.child(

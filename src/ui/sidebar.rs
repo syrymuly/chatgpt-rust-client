@@ -9,7 +9,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::Patina;
+use super::{Patina, USAGE_URL};
 
 /// Which sidebar heading a chat last updated at `updated_at` (unix seconds) falls under.
 pub(super) fn day_group(updated_at: i64, now: DateTime<Local>) -> &'static str {
@@ -52,6 +52,22 @@ fn chat_menu(menu: PopupMenu, view: &Entity<Patina>, chat: &ChatSummary) -> Popu
             view.update(cx, |this, cx| {
                 this.confirm_delete(id.clone(), title.clone(), window, cx)
             })
+        }),
+    )
+}
+
+fn account_menu(menu: PopupMenu, view: &Entity<Patina>) -> PopupMenu {
+    let (settings_view, sign_out_view) = (view.clone(), view.clone());
+    menu.item(
+        PopupMenuItem::new("Settings…").on_click(move |_, window, cx| {
+            settings_view.update(cx, |this, cx| this.open_settings(window, cx))
+        }),
+    )
+    .item(PopupMenuItem::link("Manage usage", USAGE_URL))
+    .separator()
+    .item(
+        PopupMenuItem::new("Sign out").on_click(move |_, window, cx| {
+            sign_out_view.update(cx, |this, cx| this.sign_out(window, cx))
         }),
     )
 }
@@ -123,14 +139,26 @@ impl Patina {
                     .children(rows),
             )
             .child(
-                div()
-                    .flex_none()
-                    .px_4()
-                    .py_3()
-                    .text_sm()
-                    .text_color(muted)
-                    .truncate()
-                    .children(self.account.as_ref().map(|a| a.email.clone())),
+                div().flex_none().px_2().py_2().child(
+                    Button::new("account")
+                        .ghost()
+                        .w_full()
+                        // Same inset as the rows above, so the email shares their text edge.
+                        .px_2()
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .text_color(muted)
+                                .children(self.account.as_ref().map(|a| a.email.clone())),
+                        )
+                        .accessibility_label("Account")
+                        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                            account_menu(menu, &view)
+                        }),
+                ),
             )
     }
 

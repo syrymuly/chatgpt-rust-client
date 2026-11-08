@@ -70,6 +70,7 @@ fn bind_keys_and_menus(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-n", ui::NewChat, None),
         KeyBinding::new("escape", ui::Stop, None),
+        KeyBinding::new("cmd-,", ui::OpenSettings, None),
         KeyBinding::new("cmd-q", ui::Quit, None),
         KeyBinding::new("cmd-m", ui::Minimize, None),
     ]);
@@ -78,7 +79,13 @@ fn bind_keys_and_menus(cx: &mut App) {
     cx.on_action(|_: &ui::Zoom, cx| with_window(cx, |window| window.zoom_window()));
 
     cx.set_menus([
-        Menu::new(APP_NAME).items([MenuItem::action("Quit Patina", ui::Quit)]),
+        Menu::new(APP_NAME).items([
+            MenuItem::action("About Patina", ui::About),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", ui::OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Quit Patina", ui::Quit),
+        ]),
         Menu::new("File").items([MenuItem::action("New Chat", ui::NewChat)]),
         Menu::new("Edit").items([
             MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
