@@ -1,6 +1,7 @@
 //! Local chat history and settings, stored as JSON files under the data dir:
 //! `chats/<id>.json`, `attachments/<sha256>`, `settings.json`.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -85,7 +86,8 @@ impl Store {
         }
     }
 
-    /// Newest `updated_at` first. Unreadable or corrupt files are skipped.
+    /// Newest `updated_at` first. Unreadable or corrupt files, and files whose name
+    /// doesn't match the id inside, are skipped.
     pub fn list(&self) -> Vec<ChatSummary> {
         let Ok(entries) = fs::read_dir(self.dir.join("chats")) else {
             return Vec::new();
@@ -94,23 +96,54 @@ impl Store {
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
-            .filter_map(|p| serde_json::from_slice(&fs::read(p).ok()?).ok())
+            .filter_map(|p| {
+                let chat: ChatSummary = serde_json::from_slice(&fs::read(&p).ok()?).ok()?;
+                (p.file_stem()? == chat.id.as_str()).then_some(chat)
+            })
             .collect();
         chats.sort_by(|a, b| (b.updated_at, &b.id).cmp(&(a.updated_at, &a.id)));
         chats
     }
 
     pub fn load(&self, id: &str) -> io::Result<Chat> {
-        Ok(serde_json::from_slice(&fs::read(self.chat_path(id)?)?)?)
+        let chat: Chat = serde_json::from_slice(&fs::read(self.chat_path(id)?)?)?;
+        if chat.id != id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chat id mismatch",
+            ));
+        }
+        Ok(chat)
     }
 
     pub fn save(&self, chat: &Chat) -> io::Result<()> {
         write_atomic(&self.chat_path(&chat.id)?, &serde_json::to_vec(chat)?)
     }
 
-    // ponytail: attachment files are kept on delete (they may be shared by other chats); add GC if disk use matters.
+    /// Removes the chat and every attachment no other chat still uses, so deleted
+    /// files don't linger on disk.
     pub fn delete(&self, id: &str) -> io::Result<()> {
-        fs::remove_file(self.chat_path(id)?)
+        let path = self.chat_path(id)?;
+        let mut orphans: HashSet<String> = self
+            .load(id)
+            .map(|c| attachment_hashes(&c).collect())
+            .unwrap_or_default();
+        fs::remove_file(path)?;
+        if orphans.is_empty() {
+            return Ok(());
+        }
+        // ponytail: rescans every chat; fine for a personal history, index hashes if it grows huge.
+        for summary in self.list() {
+            if let Ok(chat) = self.load(&summary.id) {
+                for sha in attachment_hashes(&chat) {
+                    orphans.remove(&sha);
+                }
+            }
+        }
+        for sha in orphans {
+            let _ = fs::remove_file(self.attachment_path(&sha)?);
+        }
+        Ok(())
     }
 
     /// Stores bytes content-addressed, so identical files are kept once.
@@ -128,14 +161,18 @@ impl Store {
     }
 
     pub fn attachment_bytes(&self, a: &Attachment) -> io::Result<Vec<u8>> {
-        let valid = a.sha256.len() == 64
-            && a.sha256
+        fs::read(self.attachment_path(&a.sha256)?)
+    }
+
+    fn attachment_path(&self, sha256: &str) -> io::Result<PathBuf> {
+        let valid = sha256.len() == 64
+            && sha256
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         if !valid {
             return Err(invalid("invalid attachment hash"));
         }
-        fs::read(self.dir.join("attachments").join(&a.sha256))
+        Ok(self.dir.join("attachments").join(sha256))
     }
 
     /// Missing or corrupt settings yield the defaults.
@@ -185,6 +222,13 @@ pub fn title_from(text: &str) -> String {
         head.rfind(char::is_whitespace).map_or(head, |i| &head[..i])
     };
     head.trim_end().into()
+}
+
+fn attachment_hashes(chat: &Chat) -> impl Iterator<Item = String> + '_ {
+    chat.messages
+        .iter()
+        .flat_map(|m| &m.attachments)
+        .map(|a| a.sha256.clone())
 }
 
 fn now() -> i64 {
@@ -297,6 +341,51 @@ mod tests {
             io::ErrorKind::NotFound
         );
         assert!(s.list().is_empty());
+        cleanup(s);
+    }
+
+    #[test]
+    fn delete_removes_unshared_attachments() {
+        let s = temp_store();
+        let shared = s.put_attachment("s.txt", "text/plain", b"shared").unwrap();
+        let own = s.put_attachment("o.txt", "text/plain", b"own").unwrap();
+        let msg = |atts: Vec<Attachment>| Message {
+            role: Role::User,
+            text: "x".into(),
+            attachments: atts,
+        };
+        let mut keep = s.new_chat();
+        keep.messages = vec![msg(vec![shared.clone()])];
+        let mut gone = s.new_chat();
+        gone.messages = vec![msg(vec![shared.clone(), own.clone()])];
+        s.save(&keep).unwrap();
+        s.save(&gone).unwrap();
+
+        s.delete(&gone.id).unwrap();
+        assert!(s.attachment_bytes(&shared).is_ok());
+        assert_eq!(
+            s.attachment_bytes(&own).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        cleanup(s);
+    }
+
+    #[test]
+    fn list_skips_files_whose_name_and_id_differ() {
+        let s = temp_store();
+        let chat = s.new_chat();
+        s.save(&chat).unwrap();
+        fs::copy(
+            s.chat_path(&chat.id).unwrap(),
+            s.dir.join("chats/copy.json"),
+        )
+        .unwrap();
+        let ids: Vec<_> = s.list().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, std::slice::from_ref(&chat.id));
+        assert_eq!(
+            s.load("copy").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         cleanup(s);
     }
 
