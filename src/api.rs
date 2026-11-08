@@ -113,7 +113,7 @@ pub fn list_models(token: &str) -> Result<Vec<Model>, ApiError> {
     parse_models(&body).ok_or_else(|| ApiError {
         status: Some(status),
         code: None,
-        message: "The model list could not be read.".into(),
+        message: "Couldn't read the model list.".into(),
         param: None,
     })
 }
