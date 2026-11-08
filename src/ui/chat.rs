@@ -18,7 +18,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::app::TurnError;
+use super::app::{Retry, TurnError};
 use super::{COLUMN, Patina, title_band};
 
 /// "Good evening, Sardar": the time of day plus the first name, when the account has one.
@@ -54,6 +54,8 @@ pub(super) fn attachment_chip(
     Attachment::new()
         .id(id)
         .xsmall()
+        // Long names are cut on the card.
+        .tooltip(attachment.name.clone())
         .media(
             AttachmentMedia::new()
                 .bg(cx.theme().transparent)
@@ -74,7 +76,16 @@ impl Patina {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let empty = self.chat.messages.is_empty();
-        let muted = cx.theme().muted_foreground;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        // Once replies scroll under the band, an edge shows where they are cut off.
+        let top = self.scroller.read(cx).logical_scroll_top();
+        let scrolled = !empty && (top.item_ix > 0 || top.offset_in_item > px(0.));
+        let edge = if scrolled {
+            theme.border
+        } else {
+            theme.transparent
+        };
         v_flex()
             .flex_1()
             .min_w_0()
@@ -85,6 +96,8 @@ impl Patina {
                     .items_center()
                     .justify_center()
                     .px_24()
+                    .border_b_1()
+                    .border_color(edge)
                     .when(!empty, |this| {
                         this.child(
                             div()
@@ -119,20 +132,34 @@ impl Patina {
         let name = self.account.as_ref().and_then(|a| a.name.as_deref());
         let hello = greeting(name, chrono::Local::now().hour());
         let view = cx.entity();
+        let danger = cx.theme().danger;
+        // The greeting ends at the midline and the composer starts there, so attachments
+        // and extra lines grow the composer downward and nothing above it moves.
         v_flex()
             .flex_1()
             .min_h_0()
-            .items_center()
-            .justify_center()
             .px_6()
-            // Balances the title bar band above, so the group sits at the window's center.
-            .pb_12()
-            .gap_8()
-            .child(div().text_size(rems(1.75)).child(hello))
-            .child(self.render_composer(window, cx))
-            .when_some(self.error.clone(), |this, error| {
-                this.child(error_line(&view, error, window, cx))
-            })
+            // More room below than the title band takes above, so the resting group (greeting,
+            // composer, plan line) sits at the window's center.
+            .pb(rems(8.5))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .justify_end()
+                    .items_center()
+                    .pb_8()
+                    .child(div().text_size(rems(1.75)).child(hello)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .gap_3()
+                    .child(self.render_composer(window, cx))
+                    .when_some(self.error.clone(), |this, error| {
+                        this.child(turn_note(&view, error, danger, window))
+                    }),
+            )
     }
 
     fn render_messages(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -159,7 +186,20 @@ fn render_row(view: &Entity<Patina>, ix: usize, window: &mut Window, cx: &mut Ap
         .as_ref()
         .filter(|_| last)
         .map(|r| (r.view.clone(), r.searching));
-    let error = this.error.clone().filter(|_| last);
+    let theme = cx.theme();
+    let (danger, muted) = (theme.danger, theme.muted_foreground);
+    let note = match this.error.clone().filter(|_| last) {
+        Some(error) => Some((error, danger)),
+        // Stopped before the first word, or quit mid-reply: the turn can still be asked again.
+        None if last && message.role == Role::User && this.reply.is_none() => Some((
+            TurnError {
+                message: "No reply.".into(),
+                retry: Retry::Reply,
+            },
+            muted,
+        )),
+        None => None,
+    };
 
     let body = match message.role {
         Role::User => user_message(ix, message, cx).into_any_element(),
@@ -176,8 +216,8 @@ fn render_row(view: &Entity<Patina>, ix: usize, window: &mut Window, cx: &mut Ap
                 .max_w(COLUMN)
                 .gap_3()
                 .child(body)
-                .when_some(error, |this, error| {
-                    this.child(error_line(view, error, window, cx))
+                .when_some(note, |this, (note, color)| {
+                    this.child(turn_note(view, note, color, window))
                 }),
         )
         .into_any_element()
@@ -241,6 +281,9 @@ fn assistant_message(
             this.child(
                 h_flex()
                     .gap_1()
+                    // Puts the first glyph, not its button's edge, on the reply's text edge:
+                    // (24 px small button - 14 px icon) / 2.
+                    .ml(px(-5.))
                     // Older replies show their actions on hover; the latest keeps them in view.
                     .when(!last, |this| {
                         this.invisible()
@@ -263,28 +306,25 @@ fn assistant_message(
         })
 }
 
-fn error_line(
+/// A line under the last turn saying why it has no reply, with a way to ask again.
+fn turn_note(
     view: &Entity<Patina>,
-    error: TurnError,
+    note: TurnError,
+    color: Hsla,
     window: &mut Window,
-    cx: &App,
 ) -> impl IntoElement {
     h_flex()
         .gap_2()
         .text_sm()
-        .child(
-            div()
-                .min_w_0()
-                .text_color(cx.theme().danger)
-                .child(error.message),
-        )
+        .child(div().min_w_0().text_color(color).child(note.message))
         .child(
             Button::new("retry")
                 .ghost()
                 .small()
+                .icon(IconName::RefreshCw)
                 .label("Retry")
                 .on_click(window.listener_for(view, move |this, _, window, cx| {
-                    this.retry(error.retry, window, cx)
+                    this.retry(note.retry, window, cx)
                 })),
         )
 }

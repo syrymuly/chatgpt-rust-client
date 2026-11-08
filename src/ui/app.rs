@@ -449,9 +449,9 @@ impl Patina {
 
     /// Debug preview only: `PATINA_PREVIEW_PROMPT` sends a message on launch,
     /// `PATINA_PREVIEW_DIALOG` (settings, welcome, usage, about, delete) opens a dialog,
-    /// `PATINA_PREVIEW_SIGNIN` (waiting, error, planoff, ended, revoke) shows a sign-in state
-    /// and `PATINA_PREVIEW_SIZE=720x480` resizes the window, so states that need input can be
-    /// checked without a keyboard.
+    /// `PATINA_PREVIEW_ATTACH=a.png:b.pdf` attaches files, `PATINA_PREVIEW_SIGNIN` (waiting,
+    /// error, planoff, ended, revoke) shows a sign-in state and `PATINA_PREVIEW_SIZE=720x480`
+    /// resizes the window, so states that need input can be checked without a keyboard.
     fn run_preview_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let preview_size = std::env::var("PATINA_PREVIEW_SIZE").ok().and_then(|s| {
             let (w, h) = s.split_once('x')?;
@@ -459,6 +459,9 @@ impl Patina {
         });
         if let Some(preview_size) = preview_size {
             window.resize(preview_size);
+        }
+        if let Some(paths) = std::env::var_os("PATINA_PREVIEW_ATTACH") {
+            self.attach_paths(std::env::split_paths(&paths).collect(), window, cx);
         }
         if let Ok(state) = std::env::var("PATINA_PREVIEW_SIGNIN") {
             self.account = None;

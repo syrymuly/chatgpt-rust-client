@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use chatgpt_rust_client::store::{self, Store};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Textarea;
+use gpui_kit::component::input::{Backspace, Textarea};
 use gpui_kit::component::link::Link;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::select::Select;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -82,11 +83,24 @@ impl Patina {
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
-                let picks = paths.into_iter().map(Pick::File).collect();
-                let _ = this.update_in(cx, |this, window, cx| this.attach(picks, window, cx));
+                let _ = this.update_in(cx, |this, window, cx| this.attach_paths(paths, window, cx));
             }
         })
         .detach();
+    }
+
+    pub(super) fn attach_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.attach(paths.into_iter().map(Pick::File).collect(), window, cx);
+    }
+
+    fn remove_pending(&mut self, sha256: &str, cx: &mut Context<Self>) {
+        self.pending.retain(|p| p.sha256 != sha256);
+        cx.notify();
     }
 
     /// Takes over a paste that carries files or an image; plain text falls through to the input.
@@ -154,27 +168,45 @@ impl Patina {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, border, surface, radius) = (
+        let (muted, border, surface, link) = (
             theme.muted_foreground,
             theme.input,
             theme.background,
-            theme.radius_lg,
+            theme.link,
         );
+        let (primary, on_primary) = (theme.primary, theme.primary_foreground);
+        // One inset all round, and the corners concentric with the send button's.
+        let inset = px(8.);
+        let radius = theme.radius + inset;
         let streaming = self.reply.is_some();
         let can_send = self.can_send(cx);
         let web_search = self.settings.web_search;
-        let view = cx.entity().downgrade();
+        let loading_models = self.models.is_empty() && self.models_task.is_some();
+        let view = cx.entity();
+        let paste_view = view.downgrade();
 
-        let chips = self.pending.iter().map(|a| {
-            let sha = a.sha256.clone();
-            attachment_chip(SharedString::from(format!("pending-{sha}")), a, cx).on_remove(
-                cx.listener(move |this, _, _, cx| {
-                    this.pending.retain(|p| p.sha256 != sha);
-                    cx.notify();
-                }),
-            )
-        });
-        let chips: Vec<_> = chips.collect();
+        let cards: Vec<_> = self
+            .pending
+            .iter()
+            .map(|a| {
+                let sha = a.sha256.clone();
+                let (remove_sha, menu_sha, menu_view) = (sha.clone(), sha.clone(), view.clone());
+                div()
+                    .id(SharedString::from(format!("pending-{sha}")))
+                    .child(
+                        attachment_chip(SharedString::from(format!("card-{sha}")), a, cx)
+                            .on_remove(cx.listener(move |this, _, _, cx| {
+                                this.remove_pending(&remove_sha, cx)
+                            })),
+                    )
+                    .context_menu(move |menu, _, _| {
+                        let (view, sha) = (menu_view.clone(), menu_sha.clone());
+                        menu.item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| this.remove_pending(&sha, cx))
+                        }))
+                    })
+            })
+            .collect();
 
         v_flex()
             .w_full()
@@ -184,19 +216,27 @@ impl Patina {
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .px_3()
-                    .pt_3()
-                    .pb_2()
+                    .p(inset)
                     .rounded(radius)
                     .border_1()
                     .border_color(border)
                     .bg(surface)
-                    .when(!chips.is_empty(), |this| {
-                        this.child(h_flex().flex_wrap().gap_2().children(chips))
+                    // The text field passes Backspace on when it has nothing to delete, so an
+                    // empty draft gives up its last attachment, as in a token field.
+                    .on_action(cx.listener(|this, _: &Backspace, _, cx| {
+                        if this.input.read(cx).value().is_empty() && this.pending.pop().is_some() {
+                            cx.notify();
+                        }
+                    }))
+                    .when(!cards.is_empty(), |this| {
+                        // The cards leave room above for their remove control; this takes
+                        // it back so the composer's inset stays even.
+                        this.child(h_flex().flex_wrap().gap_2().mt(px(-6.)).children(cards))
                     })
                     .child(Textarea::new(&self.input).appearance(false).on_paste(
                         move |item, window, cx| {
-                            view.update(cx, |this, cx| this.paste(item, window, cx))
+                            paste_view
+                                .update(cx, |this, cx| this.paste(item, window, cx))
                                 .unwrap_or(false)
                         },
                     ))
@@ -213,11 +253,14 @@ impl Patina {
                                     })),
                             )
                             .child(
+                                // On, it says so in words and color, which hover can't mimic.
                                 Button::new("web-search")
                                     .ghost()
                                     .icon(IconName::Globe)
                                     .selected(web_search)
                                     .toggled(web_search)
+                                    .when(web_search, |this| this.label("Search").text_color(link))
+                                    .accessibility_label("Search the web")
                                     .tooltip("Search the web")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.toggle_web_search(cx)),
@@ -229,7 +272,12 @@ impl Patina {
                                     Select::new(&self.model_select)
                                         .small()
                                         .appearance(false)
-                                        .placeholder("Model")
+                                        .placeholder(if loading_models {
+                                            "Loading models…"
+                                        } else {
+                                            "Model"
+                                        })
+                                        .disabled(loading_models)
                                         .accessibility_label("Model")
                                         .menu_width(rems(12.)),
                                 ),
@@ -248,6 +296,11 @@ impl Patina {
                                     .icon(IconName::ArrowUp)
                                     .accessibility_label("Send")
                                     .disabled(!can_send)
+                                    // Dimmed rather than greyed out, so the main action stays
+                                    // easy to find while the draft is empty.
+                                    .when(!can_send, |this| {
+                                        this.bg(primary).text_color(on_primary).opacity(0.5)
+                                    })
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.send(window, cx)),
                                     )

@@ -147,12 +147,18 @@ impl Patina {
                         .px_2()
                         .child(
                             div()
-                                .w_full()
+                                .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .text_sm()
                                 .text_color(muted)
                                 .children(self.account.as_ref().map(|a| a.email.clone())),
+                        )
+                        // Says the row opens a menu; it sits in the chat rows' "…" lane.
+                        .child(
+                            Icon::new(IconName::ChevronsUpDown)
+                                .xsmall()
+                                .text_color(muted),
                         )
                         .accessibility_label("Account")
                         .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
@@ -181,6 +187,7 @@ impl Patina {
                     .flex_1()
                     .min_w_0()
                     .truncate()
+                    .when(active, |this| this.font_medium())
                     .child(chat.title.clone()),
             )
             .child(
