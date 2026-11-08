@@ -116,6 +116,9 @@ fn window_options(cx: &App) -> WindowOptions {
             cx,
         ))),
         window_min_size: Some(size(px(720.), px(480.))),
+        // The window moves from Patina's own title bands (see `ui::title_band`), so AppKit
+        // doesn't also claim the strip under the traffic lights or delay clicks in it.
+        app_owns_titlebar_drag: true,
         ..Default::default()
     }
 }

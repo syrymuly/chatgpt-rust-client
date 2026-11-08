@@ -19,7 +19,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::app::TurnError;
-use super::{COLUMN, Patina};
+use super::{COLUMN, Patina, title_band};
 
 /// "Good evening, Sardar": the time of day plus the first name, when the account has one.
 pub(super) fn greeting(name: Option<&str>, hour: u32) -> String {
@@ -80,12 +80,11 @@ impl Patina {
             .min_w_0()
             .h_full()
             .child(
-                // Title bar band: the window drags from here.
-                h_flex()
-                    .h_12()
-                    .flex_none()
-                    .px_24()
+                title_band("chat-title", window, cx)
+                    .flex()
+                    .items_center()
                     .justify_center()
+                    .px_24()
                     .when(!empty, |this| {
                         this.child(
                             div()

@@ -9,7 +9,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{Patina, USAGE_URL};
+use super::{Patina, USAGE_URL, title_band};
 
 /// Which sidebar heading a chat last updated at `updated_at` (unix seconds) falls under.
 pub(super) fn day_group(updated_at: i64, now: DateTime<Local>) -> &'static str {
@@ -75,7 +75,7 @@ fn account_menu(menu: PopupMenu, view: &Entity<Patina>) -> PopupMenu {
 impl Patina {
     pub(super) fn render_sidebar(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -117,8 +117,8 @@ impl Patina {
             .border_r_1()
             .border_color(edge)
             .text_color(ink)
-            // Room for the traffic lights; the window drags from here.
-            .child(div().h_12().flex_none())
+            // Room for the traffic lights.
+            .child(title_band("sidebar-title", window, cx))
             .child(
                 div().px_2().pb_3().child(
                     row("new-chat", false, cx)
