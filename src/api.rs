@@ -177,8 +177,10 @@ fn agent() -> &'static Agent {
         Agent::config_builder()
             .http_status_as_error(false)
             .tls_config(tls)
+            .timeout_resolve(Some(Duration::from_secs(15)))
             .timeout_connect(Some(Duration::from_secs(15)))
-            // ponytail: one 10 min cap for a whole stream; add a per-read idle timeout if stalls show up.
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            // ponytail: one 10 min cap for the body; no per-read timeout since reasoning models go quiet between events.
             .timeout_global(Some(Duration::from_secs(600)))
             .build()
             .into()
