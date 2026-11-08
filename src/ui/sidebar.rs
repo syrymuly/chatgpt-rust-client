@@ -242,9 +242,11 @@ mod tests {
     #[test]
     fn chats_group_by_local_day() {
         let now = Local.with_ymd_and_hms(2026, 11, 8, 12, 0, 0).unwrap();
+        // `earliest`: 01:00 on Nov 1 2026 happens twice where US daylight time ends.
         let at = |d, h| {
             Local
                 .with_ymd_and_hms(2026, 11, d, h, 0, 0)
+                .earliest()
                 .unwrap()
                 .timestamp()
         };
