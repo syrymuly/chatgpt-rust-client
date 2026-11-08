@@ -9,14 +9,18 @@ use gpui_kit::*;
 mod ui;
 
 const THEME: &str = include_str!("../assets/patina-theme.json");
+const MARK: &[u8] = include_bytes!("../assets/mark.svg");
 
 gpui_kit::assets::icon_assets!(ExtraIcons, [Paperclip, SquarePen, FileImage]);
 
-/// The kit's component icons plus the few extra Lucide icons Patina draws.
+/// The kit's component icons plus the few extra Lucide icons and Patina's mark.
 struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == "mark.svg" {
+            return Ok(Some(Cow::Borrowed(MARK)));
+        }
         match ExtraIcons.load(path)? {
             Some(bytes) => Ok(Some(bytes)),
             None => gpui_kit::assets::Assets.load(path),

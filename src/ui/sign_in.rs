@@ -49,6 +49,7 @@ impl Patina {
                 v_flex()
                     .items_center()
                     .gap_2()
+                    .child(img("mark.svg").w(rems(3.5)).h(rems(3.75)).mb_3())
                     .child(div().text_size(rems(3.)).font_semibold().child(APP_NAME))
                     .child(
                         div()
