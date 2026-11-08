@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use chatgpt_rust_client::APP_NAME;
@@ -8,6 +9,26 @@ use gpui_kit::*;
 mod ui;
 
 const THEME: &str = include_str!("../assets/patina-theme.json");
+
+gpui_kit::assets::icon_assets!(ExtraIcons, [Paperclip, SquarePen, FileImage]);
+
+/// The kit's component icons plus the few extra Lucide icons Patina draws.
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        match ExtraIcons.load(path)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        Ok(paths)
+    }
+}
 
 /// `PATINA_DATA_DIR` points the app at another folder, e.g. seeded test data.
 fn data_dir() -> PathBuf {
@@ -47,6 +68,8 @@ fn with_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
 /// Keys are bound before the menus are built so the menus show their shortcuts.
 fn bind_keys_and_menus(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-n", ui::NewChat, None),
+        KeyBinding::new("escape", ui::Stop, None),
         KeyBinding::new("cmd-q", ui::Quit, None),
         KeyBinding::new("cmd-m", ui::Minimize, None),
     ]);
@@ -56,6 +79,7 @@ fn bind_keys_and_menus(cx: &mut App) {
 
     cx.set_menus([
         Menu::new(APP_NAME).items([MenuItem::action("Quit Patina", ui::Quit)]),
+        Menu::new("File").items([MenuItem::action("New Chat", ui::NewChat)]),
         Menu::new("Edit").items([
             MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
             MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
@@ -99,21 +123,19 @@ fn main() {
         }
     };
 
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            load_theme(cx);
-            bind_keys_and_menus(cx);
-            // One window: closing it quits, so the app never lingers without a way back in.
-            cx.on_window_closed(|cx, _| cx.quit()).detach();
-            let options = window_options(cx);
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| ui::Patina::new(store, &data_dir, window, cx))
-            })
-            .expect("failed to open window");
-            cx.activate(true);
-        });
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
+        gpui_kit::init(cx);
+        load_theme(cx);
+        bind_keys_and_menus(cx);
+        // One window: closing it quits, so the app never lingers without a way back in.
+        cx.on_window_closed(|cx, _| cx.quit()).detach();
+        let options = window_options(cx);
+        gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| ui::Patina::new(store, &data_dir, window, cx))
+        })
+        .expect("failed to open window");
+        cx.activate(true);
+    });
 }
 
 #[cfg(test)]
