@@ -316,7 +316,7 @@ impl Auth {
             ],
         )?;
         if status != 200 {
-            if TERMINAL_REFRESH_ERRORS.contains(&oauth_error(&body).as_str()) {
+            if refresh_is_terminal(status, &body) {
                 lock(&self.state).tokens = None;
                 let _ = self.keychain_save(None);
                 return Err(AuthError::SignInRequired);
@@ -706,17 +706,27 @@ fn parse_token_response(
         access_token: raw.access_token,
         refresh_token: raw.refresh_token,
         id_token: raw.id_token,
-        expires_at: now + raw.expires_in,
+        expires_at: now.saturating_add(raw.expires_in),
         scopes,
     })
 }
 
-/// The `error` code of an OAuth error body, or "" when there is none.
+/// The error code of an OAuth error body (`{"error":"c"}`, `{"error":{"code":"c"}}` or
+/// `{"code":"c"}`), or "" when there is none.
 fn oauth_error(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v["error"].as_str().map(String::from))
+        .and_then(|v| {
+            [&v["error"], &v["error"]["code"], &v["code"]]
+                .into_iter()
+                .find_map(|c| c.as_str().map(String::from))
+        })
         .unwrap_or_default()
+}
+
+/// A dead refresh token: drop the credentials and ask the user to sign in again.
+fn refresh_is_terminal(status: u16, body: &str) -> bool {
+    status == 401 || TERMINAL_REFRESH_ERRORS.contains(&oauth_error(body).as_str())
 }
 
 fn endpoint_error(status: u16, body: &str) -> AuthError {
@@ -764,7 +774,7 @@ fn check_claims(c: &Claims, client_id: &str, nonce: &str, now: i64) -> Result<()
         "the ID token has an unexpected issuer."
     } else if !for_us {
         "the ID token is not for this app."
-    } else if now > c.exp + CLOCK_SKEW_SECS {
+    } else if now > c.exp.saturating_add(CLOCK_SKEW_SECS) {
         "the ID token has expired."
     } else if c.nonce.as_deref() != Some(nonce) {
         "the ID token does not belong to this sign-in."
@@ -1009,6 +1019,7 @@ mod tests {
         assert!(check(json!({}), 950).is_ok());
         assert!(check(json!({}), 1005).is_ok(), "5 s tolerance");
         assert!(check(json!({}), 1006).is_err(), "expired");
+        assert!(check(json!({"exp": i64::MAX}), 950).is_ok(), "no overflow");
         assert!(check(json!({"iss": "https://evil.example"}), 950).is_err());
         assert!(check(json!({"aud": "oaiapp_2"}), 950).is_err());
         assert!(check(json!({"aud": ["oaiapp_1"]}), 950).is_ok());
@@ -1059,9 +1070,34 @@ mod tests {
         assert!(parse_token_response(mac, 0, None).is_err());
         let zero = r#"{"access_token":"a","token_type":"Bearer","expires_in":0,"scope":"openid"}"#;
         assert!(parse_token_response(zero, 0, None).is_err());
+        let huge = r#"{"access_token":"a","token_type":"Bearer","expires_in":9223372036854775807,"scope":"openid"}"#;
+        assert_eq!(
+            parse_token_response(huge, 100, None).unwrap().expires_at,
+            i64::MAX
+        );
+    }
 
+    #[test]
+    fn refresh_errors() {
         assert_eq!(oauth_error(r#"{"error":"invalid_grant"}"#), "invalid_grant");
+        assert_eq!(
+            oauth_error(r#"{"error":{"code":"refresh_token_expired","message":"x"}}"#),
+            "refresh_token_expired"
+        );
+        assert_eq!(
+            oauth_error(r#"{"code":"refresh_token_reused"}"#),
+            "refresh_token_reused"
+        );
         assert_eq!(oauth_error("<html>"), "");
+        assert!(refresh_is_terminal(400, r#"{"error":"invalid_grant"}"#));
+        assert!(refresh_is_terminal(
+            400,
+            r#"{"error":{"code":"refresh_token_invalidated"}}"#
+        ));
+        assert!(refresh_is_terminal(400, r#"{"code":"token_expired"}"#));
+        assert!(refresh_is_terminal(401, "<html>"), "any 401 is terminal");
+        assert!(!refresh_is_terminal(400, r#"{"error":"invalid_client"}"#));
+        assert!(!refresh_is_terminal(429, ""));
     }
 
     // RFC 7515 appendix A.2.
