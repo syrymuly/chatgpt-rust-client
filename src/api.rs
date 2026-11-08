@@ -74,8 +74,17 @@ impl ApiError {
         self.status == Some(401)
     }
 
+    /// 503s, network failures, and the "try again later" codes that can also arrive mid-stream.
     pub fn is_transient(&self) -> bool {
-        self.status == Some(503) || (self.status.is_none() && self.code.is_none())
+        self.status == Some(503)
+            || (self.status.is_none() && self.code.is_none())
+            || matches!(
+                self.code.as_deref(),
+                Some(
+                    "subscription_sharing_usage_unavailable"
+                        | "subscription_sharing_user_unavailable"
+                )
+            )
     }
 }
 
@@ -113,8 +122,8 @@ pub fn request_body(req: &Request) -> Value {
     let input: Vec<Value> = req
         .turns
         .iter()
-        // An empty assistant turn (stopped before any text) would be rejected by the API.
-        .filter(|t| t.role == Role::User || !t.text.is_empty())
+        // Empty turns (e.g. a reply stopped before any text) would be rejected by the API.
+        .filter(|t| !t.text.is_empty() || !t.attachments.is_empty())
         .map(|t| match t.role {
             Role::Assistant => json!({ "role": "assistant", "content": t.text }),
             Role::User => {
@@ -231,6 +240,13 @@ fn error_from(status: Option<u16>, e: &Value) -> ApiError {
     }
 }
 
+/// A failure reported inside the stream: never a network error, so it always has a code.
+fn server_error(e: &Value) -> ApiError {
+    let mut err = error_from(None, e);
+    err.code.get_or_insert_with(|| "response_failed".into());
+    err
+}
+
 fn parse_models(body: &str) -> Option<Vec<Model>> {
     let v: Value = serde_json::from_str(body).ok()?;
     let models = v["models"].as_array()?.iter();
@@ -285,13 +301,16 @@ fn read_events(
 fn handle_event(data: &str, on_event: &mut impl FnMut(Event)) -> Option<Result<(), ApiError>> {
     let v: Value = serde_json::from_str(data).ok()?;
     match v["type"].as_str()? {
-        "response.output_text.delta" => on_event(Event::Text(v["delta"].as_str()?.into())),
+        // A refusal is shown to the user like any other reply text.
+        "response.output_text.delta" | "response.refusal.delta" => {
+            on_event(Event::Text(v["delta"].as_str()?.into()))
+        }
         "response.web_search_call.in_progress" | "response.web_search_call.searching" => {
             on_event(Event::Searching)
         }
         "response.web_search_call.completed" => on_event(Event::SearchDone),
         "response.completed" => return Some(Ok(())),
-        "response.failed" => return Some(Err(error_from(None, &v["response"]["error"]))),
+        "response.failed" => return Some(Err(server_error(&v["response"]["error"]))),
         "response.incomplete" => {
             let reason = v["response"]["incomplete_details"]["reason"].as_str();
             return Some(Err(ApiError {
@@ -303,7 +322,7 @@ fn handle_event(data: &str, on_event: &mut impl FnMut(Event)) -> Option<Result<(
         }
         "error" => {
             let e = v.get("error").filter(|e| e.is_object()).unwrap_or(&v);
-            return Some(Err(error_from(None, e)));
+            return Some(Err(server_error(e)));
         }
         _ => {}
     }
@@ -488,12 +507,45 @@ mod tests {
             (Some("server_error"), "Oops")
         );
 
+        let err = run("data: {\"type\":\"response.failed\",\"response\":{}}\n\n")
+            .1
+            .unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("response_failed"));
+        assert!(!err.is_transient());
+
+        let sse = "data: {\"type\":\"error\",\"code\":\"subscription_sharing_usage_unavailable\",\"message\":\"Later\"}\n\n";
+        assert!(run(sse).1.unwrap_err().is_transient());
+
         let (events, result) =
             run("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n");
         assert_eq!(events, [Event::Text("Hi".into())]);
         let err = result.unwrap_err();
         assert_eq!(err.message, "The response ended early.");
         assert!(err.is_transient());
+    }
+
+    #[test]
+    fn sse_refusal_is_text() {
+        let sse = "data: {\"type\":\"response.refusal.delta\",\"delta\":\"I can't help with that.\"}\n\n\
+                   data: {\"type\":\"response.completed\"}\n\n";
+        let (events, result) = run(sse);
+        assert_eq!(result, Ok(()));
+        assert_eq!(events, [Event::Text("I can't help with that.".into())]);
+    }
+
+    #[test]
+    fn empty_turns_are_skipped() {
+        let turns = [
+            user("", vec![]),
+            user("Hi", vec![]),
+            Turn {
+                role: Role::Assistant,
+                text: String::new(),
+                attachments: vec![],
+            },
+        ];
+        let body = request_body(&req(&turns, None, false));
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
     }
 
     #[test]
