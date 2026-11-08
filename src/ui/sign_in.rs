@@ -7,7 +7,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::Patina;
+use super::{Patina, title_band};
 
 const PLAN_USAGE_OFF: &str = "Plan usage wasn't enabled for this app. Sign in again and allow it.";
 
@@ -29,6 +29,7 @@ impl Patina {
         let has_notice = notice.is_some();
 
         v_flex()
+            .relative()
             .size_full()
             .items_center()
             .justify_center()
@@ -36,6 +37,14 @@ impl Patina {
             // The title's line box leaves more air above the caps than the footnote leaves
             // below its text; this evens the visible stack out on the window's center.
             .pb_5()
+            // Out of the flow, so the stack stays centered on the whole window.
+            .child(
+                title_band("sign-in-title", window, cx)
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0(),
+            )
             .child(
                 v_flex()
                     .items_center()
