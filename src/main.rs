@@ -1,10 +1,9 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use chatgpt_rust_client::APP_NAME;
 use chatgpt_rust_client::store::Store;
-use gpui_kit::component::{Theme, ThemeConfig, ThemeRegistry, input};
+use gpui_kit::component::{Theme, ThemeRegistry, input};
 use gpui_kit::*;
 
 mod ui;
@@ -48,17 +47,8 @@ fn load_theme(cx: &mut App) {
     registry
         .load_themes_from_str(THEME)
         .expect("bundled theme is valid");
-    // The Patina themes set colors only. Without the kit's code colors for each mode, dark
-    // mode would keep the light syntax palette and its navy tokens would vanish.
-    let with_code_colors = |name: &str, kit: &Rc<ThemeConfig>| {
-        registry.themes().get(name).map(|theme| {
-            let mut theme = ThemeConfig::clone(theme);
-            theme.highlight = theme.highlight.or_else(|| kit.highlight.clone());
-            Rc::new(theme)
-        })
-    };
-    let light = with_code_colors("Patina Light", registry.default_light_theme());
-    let dark = with_code_colors("Patina Dark", registry.default_dark_theme());
+    let light = registry.themes().get("Patina Light").cloned();
+    let dark = registry.themes().get("Patina Dark").cloned();
     let theme = Theme::global_mut(cx);
     if let Some(light) = light {
         theme.light_theme = light;
