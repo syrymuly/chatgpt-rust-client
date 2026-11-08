@@ -205,7 +205,8 @@ impl Store {
     }
 }
 
-/// First line, trimmed, at most 48 chars cut at a word boundary; "New chat" if empty.
+/// First line, trimmed, at most 48 chars cut at a word boundary, plus "…" when cut so it
+/// doesn't read as a finished sentence; "New chat" if empty.
 pub fn title_from(text: &str) -> String {
     let line = text.trim().lines().next().unwrap_or("").trim();
     if line.is_empty() {
@@ -221,7 +222,7 @@ pub fn title_from(text: &str) -> String {
         // Back up to the last space; hard cut if there is none.
         head.rfind(char::is_whitespace).map_or(head, |i| &head[..i])
     };
-    head.trim_end().into()
+    format!("{}…", head.trim_end())
 }
 
 fn attachment_hashes(chat: &Chat) -> impl Iterator<Item = String> + '_ {
@@ -467,20 +468,20 @@ mod tests {
         let exact = "a".repeat(48);
         assert_eq!(title_from(&exact), exact);
 
-        // 49+ chars: cut back to the last word boundary.
+        // 49+ chars: cut back to the last word boundary, marked as cut.
         let long = "The quick brown fox jumps over the lazy dog again and again";
         assert_eq!(
             title_from(long),
-            "The quick brown fox jumps over the lazy dog"
+            "The quick brown fox jumps over the lazy dog…"
         );
         // Boundary falls exactly after a full word.
         let words = format!("{} tail", "b".repeat(48));
-        assert_eq!(title_from(&words), "b".repeat(48));
+        assert_eq!(title_from(&words), format!("{}…", "b".repeat(48)));
         // One long word: hard cut at 48 chars.
-        assert_eq!(title_from(&"x".repeat(60)), "x".repeat(48));
+        assert_eq!(title_from(&"x".repeat(60)), format!("{}…", "x".repeat(48)));
         // Counts chars, not bytes.
         let cyr = "Привет ".repeat(10);
         let t = title_from(&cyr);
-        assert!(t.chars().count() <= 48 && t.ends_with("Привет"), "{t}");
+        assert!(t.chars().count() <= 49 && t.ends_with("Привет…"), "{t}");
     }
 }
