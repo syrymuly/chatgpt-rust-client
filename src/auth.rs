@@ -72,9 +72,9 @@ impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             AuthError::Cancelled => f.write_str("Sign-in was cancelled."),
-            AuthError::Denied => f.write_str("Access was not allowed in ChatGPT."),
+            AuthError::Denied => f.write_str("Access wasn't allowed in ChatGPT."),
             AuthError::SignInRequired => f.write_str("Sign in with ChatGPT to continue."),
-            AuthError::Network(m) => write!(f, "Could not reach ChatGPT: {m}"),
+            AuthError::Network(m) => write!(f, "Couldn't reach ChatGPT: {m}"),
             AuthError::Protocol(m) => write!(f, "Sign-in failed: {m}"),
         }
     }
@@ -227,7 +227,7 @@ impl Auth {
             Err(_) => respond(
                 &stream,
                 "400 Bad Request",
-                &format!("Sign-in did not finish. Return to {app_name} and try again."),
+                &format!("Sign-in didn't finish. Return to {app_name} and try again."),
             ),
         }
         result
@@ -599,7 +599,7 @@ fn wait_for_callback(
             None => respond(
                 &stream,
                 "400 Bad Request",
-                "This is not a valid sign-in response.",
+                "This isn't a valid sign-in response.",
             ),
             Some(Ok(callback)) => return Ok((stream, callback)),
             Some(Err(e)) => {
@@ -607,7 +607,7 @@ fn wait_for_callback(
                     AuthError::Denied => format!(
                         "Sign-in was cancelled. You can close this tab and return to {app_name}."
                     ),
-                    _ => format!("Sign-in did not finish. Return to {app_name} and try again."),
+                    _ => format!("Sign-in didn't finish. Return to {app_name} and try again."),
                 };
                 respond(&stream, "400 Bad Request", &line);
                 return Err(e);

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="472" viewBox="292 280 440 472">
+  <defs>
+    <linearGradient id="copper" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#E6AD80"/>
+      <stop offset="0.55" stop-color="#C47F52"/>
+      <stop offset="1" stop-color="#9A5B37"/>
+    </linearGradient>
+  </defs>
+  <path fill-rule="evenodd" fill="url(#copper)" d="M 388 280 H 636 A 96 96 0 0 1 732 376 V 564 A 96 96 0 0 1 636 660 H 424 L 292 752 V 376 A 96 96 0 0 1 388 280 Z M 452 384 H 588 A 40 40 0 0 1 628 424 V 516 A 40 40 0 0 1 588 556 H 452 A 40 40 0 0 1 412 516 V 424 A 40 40 0 0 1 452 384 Z"/>
+</svg>
