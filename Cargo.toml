@@ -8,7 +8,10 @@ repository = "https://github.com/syrymuly/chatgpt-rust-client"
 publish = false
 
 [dependencies]
+base64 = "0.23.1"
 gpui-kit = { version = "=0.9.0", features = ["syntect"] }
+serde_json = "1.0.154"
+ureq = { version = "3.5.1", default-features = false, features = ["native-tls"] }
 
 [profile.release]
 strip = "symbols"
