@@ -40,6 +40,8 @@ const DYNAMIC_CLIENT: &str = "dynamic_agent_client";
 const KEYCHAIN_SERVICE: &str = "io.github.syrymuly.patina";
 const KEYCHAIN_ACCOUNT: &str = "credentials";
 const REFRESH_MARGIN_SECS: i64 = 120;
+/// Documented access-token lifetime, used if a refresh response leaves out `expires_in`.
+const DEFAULT_LIFETIME_SECS: i64 = 3600;
 const CLOCK_SKEW_SECS: i64 = 5;
 const TERMINAL_REFRESH_ERRORS: &[&str] = &[
     "invalid_grant",
@@ -268,8 +270,24 @@ impl Auth {
             .map_err(|e| protocol(format!("the ID token is invalid ({e}).")))?;
         check_claims(&claims, &client_id, nonce, now())?;
         if reg.subject.as_ref().is_some_and(|s| *s != claims.sub) {
+            // Another account needs its own registration: revoke both grants, start fresh.
+            self.revoke(&refresh_token, &client_id);
+            let _serial = lock(&self.refresh);
+            let previous = lock(&self.state).tokens.take();
+            if let Some(previous) = previous {
+                self.revoke(&previous.refresh_token, &client_id);
+            }
+            let fresh = Registration {
+                ext_agent_host_id: reg.ext_agent_host_id,
+                client_id: None,
+                subject: None,
+                email: None,
+            };
+            self.save_registration(&fresh)?;
+            let _ = self.keychain_save(None);
+            lock(&self.state).reg = fresh;
             return Err(protocol(
-                "a different ChatGPT account was used than before.",
+                "that is a different ChatGPT account than before. Sign in again to use it.",
             ));
         }
         reg.subject = Some(claims.sub);
@@ -283,13 +301,18 @@ impl Auth {
             name: claims.name,
             email: claims.email.unwrap_or_default(),
         };
-        self.save_registration(&reg)?;
-        self.keychain_save(Some(&tokens))?;
         let account = tokens.account();
-        *lock(&self.state) = State {
-            reg,
-            tokens: Some(tokens),
-        };
+        {
+            // Serialized with refresh and sign-out so neither can overwrite the new grant.
+            // ponytail: the replaced grant is not revoked, in case the server ties it to the new one.
+            let _serial = lock(&self.refresh);
+            self.save_registration(&reg)?;
+            self.keychain_save(Some(&tokens))?;
+            *lock(&self.state) = State {
+                reg,
+                tokens: Some(tokens),
+            };
+        }
         Ok(account)
     }
 
@@ -306,7 +329,7 @@ impl Auth {
             let client_id = state.reg.client_id.clone();
             (client_id.ok_or(AuthError::SignInRequired)?, tokens.clone())
         };
-        let (status, body) = self.post_form(
+        let refreshed = self.post_form(
             TOKEN_URL,
             &[
                 ("grant_type", "refresh_token"),
@@ -314,14 +337,26 @@ impl Auth {
                 ("refresh_token", &old.refresh_token),
                 ("resource", RESOURCE),
             ],
-        )?;
+        );
+        // A temporary failure is not fatal while the current token still has a little life left.
+        let still_valid = |e: AuthError| {
+            if old.expires_at - now() > 5 {
+                Ok(old.access_token.clone())
+            } else {
+                Err(e)
+            }
+        };
+        let (status, body) = match refreshed {
+            Ok(r) => r,
+            Err(e) => return still_valid(e),
+        };
         if status != 200 {
             if refresh_is_terminal(status, &body) {
                 lock(&self.state).tokens = None;
                 let _ = self.keychain_save(None);
                 return Err(AuthError::SignInRequired);
             }
-            return Err(endpoint_error(status, &body));
+            return still_valid(endpoint_error(status, &body));
         }
         let grant = parse_token_response(&body, now(), Some(&old.scopes))?;
         // ponytail: a refreshed id_token is stored, not re-verified; name and email come from sign-in.
@@ -585,14 +620,23 @@ fn wait_for_callback(
 /// Reads one HTTP request (line and headers) and returns the GET target.
 fn read_request_target(stream: &TcpStream) -> Option<String> {
     stream.set_nonblocking(false).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+    // One budget for the whole request, so a slow client can't stall the cancel check.
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut reader = BufReader::new(stream.take(16 * 1024));
+    let mut read_line = |buf: &mut String| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        !left.is_zero()
+            && stream.set_read_timeout(Some(left)).is_ok()
+            && reader.read_line(buf).is_ok_and(|n| n > 0)
+    };
     let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
+    if !read_line(&mut line) {
+        return None;
+    }
     let target = line.strip_prefix("GET ")?.split(' ').next()?.to_string();
     // Drain the headers: closing with unread input resets the connection before the page shows.
     let mut header = String::new();
-    while reader.read_line(&mut header).is_ok_and(|n| n > 2) {
+    while read_line(&mut header) && header.len() > 2 {
         header.clear();
     }
     Some(target)
@@ -688,13 +732,22 @@ fn parse_token_response(
         access_token: String,
         refresh_token: Option<String>,
         id_token: Option<String>,
-        token_type: String,
-        expires_in: i64,
+        token_type: Option<String>,
+        expires_in: Option<i64>,
         scope: Option<String>,
     }
     let raw: Raw = serde_json::from_str(body)
         .map_err(|e| protocol(format!("unexpected token response ({e}).")))?;
-    if !raw.token_type.eq_ignore_ascii_case("bearer") || raw.expires_in <= 0 {
+    // A refresh is accepted leniently: its rotated refresh token must not be thrown away
+    // over a missing field, or the next refresh fails and the user is signed out.
+    let refreshing = previous_scopes.is_some();
+    let token_type = raw
+        .token_type
+        .unwrap_or_else(|| if refreshing { "Bearer" } else { "" }.into());
+    let expires_in = raw
+        .expires_in
+        .unwrap_or(if refreshing { DEFAULT_LIFETIME_SECS } else { 0 });
+    if !token_type.eq_ignore_ascii_case("bearer") || expires_in <= 0 {
         return Err(protocol("unexpected token type or lifetime."));
     }
     let scopes = match (raw.scope, previous_scopes) {
@@ -706,7 +759,7 @@ fn parse_token_response(
         access_token: raw.access_token,
         refresh_token: raw.refresh_token,
         id_token: raw.id_token,
-        expires_at: now.saturating_add(raw.expires_in),
+        expires_at: now.saturating_add(expires_in),
         scopes,
     })
 }
@@ -730,13 +783,14 @@ fn refresh_is_terminal(status: u16, body: &str) -> bool {
 }
 
 fn endpoint_error(status: u16, body: &str) -> AuthError {
-    if status >= 500 {
-        network(format!(
+    if status >= 500 || status == 429 {
+        return network(format!(
             "the sign-in service is unavailable (HTTP {status})."
-        ))
-    } else {
-        let code = oauth_error(body);
-        protocol(format!("the request was rejected ({code}, HTTP {status})."))
+        ));
+    }
+    match oauth_error(body) {
+        code if code.is_empty() => protocol(format!("the request was rejected (HTTP {status}).")),
+        code => protocol(format!("the request was rejected ({code}, HTTP {status}).")),
     }
 }
 
@@ -1098,6 +1152,22 @@ mod tests {
         assert!(refresh_is_terminal(401, "<html>"), "any 401 is terminal");
         assert!(!refresh_is_terminal(400, r#"{"error":"invalid_client"}"#));
         assert!(!refresh_is_terminal(429, ""));
+        assert!(matches!(endpoint_error(429, ""), AuthError::Network(_)));
+        assert_eq!(
+            endpoint_error(403, "<html>blocked</html>").to_string(),
+            "Sign-in failed: the request was rejected (HTTP 403)."
+        );
+    }
+
+    #[test]
+    fn refresh_response_is_lenient_but_sign_in_is_strict() {
+        let body = r#"{"access_token":"a2","refresh_token":"NEW"}"#;
+        let previous = ["openid".to_string()];
+        let grant = parse_token_response(body, 100, Some(&previous)).unwrap();
+        assert_eq!(grant.refresh_token.as_deref(), Some("NEW"));
+        assert_eq!(grant.expires_at, 100 + DEFAULT_LIFETIME_SECS);
+        assert_eq!(grant.scopes, previous);
+        assert!(parse_token_response(body, 100, None).is_err());
     }
 
     // RFC 7515 appendix A.2.
