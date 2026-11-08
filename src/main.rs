@@ -1,23 +1,27 @@
-use gpui_kit::component::{Theme, ThemeRegistry};
+use std::path::PathBuf;
+
+use chatgpt_rust_client::APP_NAME;
+use chatgpt_rust_client::store::Store;
+use gpui_kit::component::{Theme, ThemeRegistry, input};
 use gpui_kit::*;
+
+mod ui;
 
 const THEME: &str = include_str!("../assets/patina-theme.json");
 
-struct App;
-
-impl Render for App {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child("Hello")
-    }
+/// `PATINA_DATA_DIR` points the app at another folder, e.g. seeded test data.
+fn data_dir() -> PathBuf {
+    std::env::var_os("PATINA_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::data_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(APP_NAME)
+        })
 }
 
-/// Registers the bundled Patina themes and follows the system appearance.
-fn load_theme(cx: &mut gpui_kit::App) {
+/// Registers the bundled Patina themes; the window keeps them in step with the system appearance.
+fn load_theme(cx: &mut App) {
     let registry = ThemeRegistry::global_mut(cx);
     registry
         .load_themes_from_str(THEME)
@@ -34,14 +38,81 @@ fn load_theme(cx: &mut gpui_kit::App) {
     Theme::change(cx.window_appearance(), None, cx);
 }
 
+fn with_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
+    if let Some(window) = cx.active_window() {
+        let _ = window.update(cx, |_, window, _| f(window));
+    }
+}
+
+/// Keys are bound before the menus are built so the menus show their shortcuts.
+fn bind_keys_and_menus(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", ui::Quit, None),
+        KeyBinding::new("cmd-m", ui::Minimize, None),
+    ]);
+    cx.on_action(|_: &ui::Quit, cx| cx.quit());
+    cx.on_action(|_: &ui::Minimize, cx| with_window(cx, |window| window.minimize_window()));
+    cx.on_action(|_: &ui::Zoom, cx| with_window(cx, |window| window.zoom_window()));
+
+    cx.set_menus([
+        Menu::new(APP_NAME).items([MenuItem::action("Quit Patina", ui::Quit)]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
+            MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
+            MenuItem::separator(),
+            MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+            MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+        ]),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", ui::Minimize),
+            MenuItem::action("Zoom", ui::Zoom),
+        ]),
+    ]);
+}
+
+fn window_options(cx: &App) -> WindowOptions {
+    WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: Some(APP_NAME.into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(16.), px(16.))),
+        }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1100.), px(760.)),
+            cx,
+        ))),
+        window_min_size: Some(size(px(720.), px(480.))),
+        ..Default::default()
+    }
+}
+
 fn main() {
+    let data_dir = data_dir();
+    let store = match Store::open(data_dir.clone()) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("{APP_NAME} can't open {}: {e}", data_dir.display());
+            std::process::exit(1);
+        }
+    };
+
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
+        .run(move |cx| {
             gpui_kit::init(cx);
             load_theme(cx);
-            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| App))
-                .expect("failed to open window");
+            bind_keys_and_menus(cx);
+            // One window: closing it quits, so the app never lingers without a way back in.
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+            let options = window_options(cx);
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| ui::Patina::new(store, &data_dir, window, cx))
+            })
+            .expect("failed to open window");
+            cx.activate(true);
         });
 }
 
