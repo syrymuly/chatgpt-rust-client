@@ -2,7 +2,8 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chatgpt_rust_client::APP_NAME;
 use chatgpt_rust_client::api::{self, ApiError, Model};
@@ -42,12 +43,16 @@ pub struct Patina {
     pub(super) input: Entity<TextareaState>,
     pub(super) model_select: Entity<SelectState<Vec<ModelItem>>>,
     pub(super) scroller: Entity<MessageScrollerState>,
-    /// The custom instructions field in Settings; edits are saved as they happen.
+    /// The custom instructions field in Settings; edits are saved once typing pauses.
     pub(super) instructions: Entity<TextareaState>,
+    pub(super) disk: Disk,
     focus_handle: FocusHandle,
     /// The sign-in screen's only action, focused so Return starts it.
     pub(super) sign_in_button: FocusHandle,
-    models_task: Option<Task<()>>,
+    /// `Some` while the model list is loading.
+    pub(super) models_task: Option<Task<()>>,
+    open_task: Option<Task<()>>,
+    instructions_save: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -181,12 +186,7 @@ impl ReplyJob {
 
     fn stream(&self, tx: &smol::channel::Sender<ReplyMsg>) -> Result<(), Failure> {
         let token = self.auth.access_token()?;
-        let turns = self
-            .history
-            .iter()
-            .map(|m| self.turn(m))
-            .collect::<io::Result<Vec<_>>>()
-            .map_err(|e| Failure::Other(format!("Couldn't read an attachment: {e}")))?;
+        let turns: Vec<_> = self.history.iter().map(|m| self.turn(m)).collect();
         let send = |event| {
             let _ = tx.send_blocking(ReplyMsg::Event(event));
         };
@@ -211,27 +211,86 @@ impl ReplyJob {
         }
     }
 
-    fn turn(&self, message: &Message) -> io::Result<api::Turn> {
-        let attachments = message
-            .attachments
-            .iter()
-            .map(|a| {
-                Ok(api::Attachment {
+    /// A file that can't be read any more is named in the text instead, so one lost
+    /// attachment doesn't fail every later turn of the chat.
+    fn turn(&self, message: &Message) -> api::Turn {
+        let mut text = message.text.clone();
+        let mut attachments = Vec::new();
+        for a in &message.attachments {
+            match self.store.attachment_bytes(a) {
+                Ok(data) => attachments.push(api::Attachment {
                     name: a.name.clone(),
                     mime: a.mime.clone(),
-                    data: self.store.attachment_bytes(a)?,
-                })
-            })
-            .collect::<io::Result<_>>()?;
-        Ok(api::Turn {
+                    data,
+                }),
+                Err(e) => {
+                    log(format!("can't read attachment {}: {e}", a.name));
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&format!("[attachment unavailable: {}]", a.name));
+                }
+            }
+        }
+        api::Turn {
             role: match message.role {
                 Role::User => api::Role::User,
                 Role::Assistant => api::Role::Assistant,
             },
-            text: message.text.clone(),
+            text,
             attachments,
-        })
+        }
     }
+}
+
+/// Runs store writes, and the loads that must see them, in order on one thread: the UI
+/// never waits on an fsync, and a chat is never read back older than its last save.
+#[derive(Clone)]
+pub(super) struct Disk(mpsc::Sender<Box<dyn FnOnce() + Send>>);
+
+impl Disk {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        std::thread::spawn(move || rx.into_iter().for_each(|job| job()));
+        Disk(tx)
+    }
+
+    fn queue(&self, job: impl FnOnce() + Send + 'static) {
+        let _ = self.0.send(Box::new(job));
+    }
+
+    /// Queues `work` behind every earlier job and resolves with its result.
+    pub(super) fn run<T, F>(&self, work: F) -> impl Future<Output = Option<T>> + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let (tx, rx) = smol::channel::bounded(1);
+        self.queue(move || {
+            let _ = tx.send_blocking(work());
+        });
+        async move { rx.recv().await.ok() }
+    }
+
+    /// Blocks until every queued job is done; only for quitting.
+    fn flush(&self) {
+        smol::block_on(self.run(|| ()));
+    }
+}
+
+/// Deletes a chat but keeps the files of draft attachments, which no saved chat
+/// references yet and the store's cleanup would otherwise remove.
+fn delete_keeping(store: &Store, id: &str, drafts: &[store::Attachment]) -> io::Result<()> {
+    let kept: Vec<_> = drafts
+        .iter()
+        .filter_map(|a| Some((a, store.attachment_bytes(a).ok()?)))
+        .collect();
+    store.delete(id)?;
+    for (a, bytes) in kept {
+        // A no-op for files the cleanup left alone.
+        let _ = store.put_attachment(&a.name, &a.mime, &bytes);
+    }
+    Ok(())
 }
 
 const SESSION_ENDED: &str = "Your session ended. Sign in again to continue.";
@@ -334,9 +393,24 @@ impl Patina {
                 cx.subscribe(&instructions, |this, input, event: &InputEvent, cx| {
                     if let InputEvent::Change = event {
                         this.settings.instructions = input.read(cx).value().to_string();
-                        this.save_settings();
+                        // Written once typing pauses, not on every keystroke.
+                        this.instructions_save = Some(cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(500))
+                                .await;
+                            let _ = this.update(cx, |this, _| {
+                                this.instructions_save = None;
+                                this.save_settings();
+                            });
+                        }));
                     }
                 }),
+                cx.on_app_quit(|this, _| {
+                    this.save_before_exit();
+                    async {}
+                }),
+                // Closing the window drops this view before the app quits.
+                cx.on_release(|this, _| this.save_before_exit()),
             ];
 
         let mut this = Self {
@@ -356,9 +430,12 @@ impl Patina {
             model_select,
             scroller,
             instructions,
+            disk: Disk::new(),
             focus_handle: cx.focus_handle(),
             sign_in_button: cx.focus_handle(),
             models_task: None,
+            open_task: None,
+            instructions_save: None,
             _subscriptions: subscriptions,
         };
         this.enter(window, cx);
@@ -538,11 +615,23 @@ impl Patina {
         });
         self.models_task = Some(cx.spawn_in(window, async move |this, cx| {
             let Some(result) = job.await else { return };
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(models) => this.set_models(models, window, cx),
-                Err(failure) => this.fail(failure, Retry::Models, window, cx),
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.models_task = None;
+                match result {
+                    Ok(models) => this.set_models(models, window, cx),
+                    Err(failure) => this.fail(failure, Retry::Models, window, cx),
+                }
             });
         }));
+        cx.notify();
+    }
+
+    /// Asks for the model list again when it is missing, e.g. after a failed load at
+    /// launch whose Retry was cleared by switching chats.
+    fn ensure_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.signed_in() && self.models.is_empty() && self.models_task.is_none() {
+            self.load_models(window, cx);
+        }
     }
 
     /// Keeps the saved model when the account still offers it, else picks the first.
@@ -577,8 +666,11 @@ impl Patina {
     }
 
     pub(super) fn save_settings(&self) {
+        let (store, settings) = (self.store.clone(), self.settings.clone());
         // ponytail: a failed settings write only loses a preference, so it is not surfaced.
-        let _ = self.store.save_settings(&self.settings);
+        self.disk.queue(move || {
+            let _ = store.save_settings(&settings);
+        });
     }
 
     pub(super) fn can_send(&self, cx: &App) -> bool {
@@ -612,10 +704,13 @@ impl Patina {
     }
 
     fn start_reply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_models(window, cx);
         let Some(model) = self.settings.model.clone() else {
             return;
         };
         self.error = None;
+        // On disk before the reply starts, so a quit mid-reply never leaves an empty one.
+        self.save_chat(window, cx);
         let job = ReplyJob {
             auth: self.auth.clone(),
             store: self.store.clone(),
@@ -649,7 +744,6 @@ impl Patina {
             searching: false,
             _task: task,
         });
-        self.save_chat(window, cx);
         self.sync_rows(cx);
         cx.notify();
     }
@@ -740,7 +834,8 @@ impl Patina {
 
     /// Drops the trailing reply (finished, partial or failed) and asks again.
     pub(super) fn regenerate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.reply.is_some() {
+        // Without a model the reply would be dropped and never replaced.
+        if self.reply.is_some() || self.settings.model.is_none() {
             return;
         }
         while self
@@ -761,9 +856,16 @@ impl Patina {
             return;
         }
         self.chat.updated_at = unix_now();
-        if let Err(e) = self.store.save(&self.chat) {
-            window.push_notification(format!("Couldn't save this chat: {e}"), cx);
-        }
+        let (store, chat) = (self.store.clone(), self.chat.clone());
+        let saved = self.disk.run(move || store.save(&chat));
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(Err(e)) = saved.await {
+                let _ = this.update_in(cx, |_, window, cx| {
+                    window.push_notification(format!("Couldn't save this chat: {e}"), cx)
+                });
+            }
+        })
+        .detach();
         self.chats.retain(|c| c.id != self.chat.id);
         self.chats.insert(
             0,
@@ -794,6 +896,7 @@ impl Patina {
     fn show_chat(&mut self, chat: Chat, window: &mut Window, cx: &mut Context<Self>) {
         self.chat = chat;
         self.error = None;
+        self.ensure_models(window, cx);
         let count = self.chat.messages.len();
         self.scroller.update(cx, |rows, cx| rows.reset(count, cx));
         self.input.update(cx, |input, cx| input.focus(window, cx));
@@ -814,10 +917,15 @@ impl Patina {
             return;
         }
         self.finish_reply(window, cx);
-        match self.store.load(id) {
-            Ok(chat) => self.show_chat(chat, window, cx),
-            Err(e) => window.push_notification(format!("Couldn't open this chat: {e}"), cx),
-        }
+        let (store, id) = (self.store.clone(), id.to_string());
+        let loaded = self.disk.run(move || store.load(&id));
+        self.open_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let Some(result) = loaded.await else { return };
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(chat) => this.show_chat(chat, window, cx),
+                Err(e) => window.push_notification(format!("Couldn't open this chat: {e}"), cx),
+            });
+        }));
     }
 
     /// Opens the chat above (`-1`) or below (`1`) the open one in the sidebar.
@@ -845,19 +953,50 @@ impl Patina {
     }
 
     pub(super) fn delete_chat(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let open = self.chat.id == id;
-        if open {
+        if self.chat.id == id {
             self.finish_reply(window, cx);
-        }
-        if let Err(e) = self.store.delete(id) {
-            return window.push_notification(format!("Couldn't delete this chat: {e}"), cx);
-        }
-        self.chats.retain(|c| c.id != id);
-        if open {
             let chat = self.store.new_chat();
             self.show_chat(chat, window, cx);
         }
+        self.chats.retain(|c| c.id != id);
+        let (store, id, drafts) = (self.store.clone(), id.to_string(), self.pending.clone());
+        let deleted = self.disk.run(move || delete_keeping(&store, &id, &drafts));
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(Err(e)) = deleted.await {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    window.push_notification(format!("Couldn't delete this chat: {e}"), cx);
+                    this.chats = this.store.list();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// Quitting mid-reply keeps the text that already arrived, as Stop does, and waits for
+    /// queued writes, since the process ends right after.
+    fn save_before_exit(&mut self) {
+        if let Some(reply) = self.reply.take() {
+            reply.cancel.store(true, Ordering::Relaxed);
+            if self
+                .chat
+                .messages
+                .last()
+                .is_some_and(|m| m.role == Role::Assistant && m.text.is_empty())
+            {
+                self.chat.messages.pop();
+            }
+            self.chat.updated_at = unix_now();
+            let (store, chat) = (self.store.clone(), self.chat.clone());
+            self.disk.queue(move || {
+                let _ = store.save(&chat);
+            });
+        }
+        if self.instructions_save.take().is_some() {
+            self.save_settings();
+        }
+        self.disk.flush();
     }
 
     pub(super) fn toggle_web_search(&mut self, cx: &mut Context<Self>) {

@@ -118,10 +118,11 @@ impl Patina {
         true
     }
 
-    /// Stores attachments off the UI thread, then adds them to the draft.
+    /// Stores attachments off the UI thread, in order with other writes, then adds them to
+    /// the draft.
     fn attach(&mut self, picks: Vec<Pick>, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        let job = cx.background_spawn(async move {
+        let job = self.disk.run(move || {
             picks
                 .into_iter()
                 .map(|pick| pick.store(&store))
@@ -130,7 +131,7 @@ impl Patina {
         // ponytail: a chip removed before sending leaves its file in attachments/ until a chat
         // using the same bytes is deleted; prune unreferenced files if that ever adds up.
         cx.spawn_in(window, async move |this, cx| {
-            let results = job.await;
+            let Some(results) = job.await else { return };
             let _ = this.update_in(cx, |this, window, cx| {
                 for result in results {
                     match result {
