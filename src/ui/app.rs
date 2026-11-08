@@ -331,10 +331,18 @@ impl Patina {
         this
     }
 
-    /// Debug preview only: `PATINA_PREVIEW_PROMPT` sends a message on launch and
-    /// `PATINA_PREVIEW_DIALOG` (settings, welcome, usage, about, delete) opens a dialog, so
-    /// states that need input can be checked without a keyboard.
+    /// Debug preview only: `PATINA_PREVIEW_PROMPT` sends a message on launch,
+    /// `PATINA_PREVIEW_DIALOG` (settings, welcome, usage, about, delete) opens a dialog and
+    /// `PATINA_PREVIEW_SIZE=720x480` resizes the window, so states that need input can be
+    /// checked without a keyboard.
     fn run_preview_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let preview_size = std::env::var("PATINA_PREVIEW_SIZE").ok().and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some(size(px(w.parse().ok()?), px(h.parse().ok()?)))
+        });
+        if let Some(preview_size) = preview_size {
+            window.resize(preview_size);
+        }
         if let Ok(prompt) = std::env::var("PATINA_PREVIEW_PROMPT") {
             self.input
                 .update(cx, |input, cx| input.set_value(prompt, window, cx));
