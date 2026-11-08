@@ -11,7 +11,22 @@ use gpui_kit::*;
 
 gpui_kit::actions!(
     patina,
-    [NewChat, Stop, OpenSettings, About, Quit, Minimize, Zoom]
+    [
+        NewChat,
+        DeleteChat,
+        PreviousChat,
+        NextChat,
+        Stop,
+        OpenSettings,
+        About,
+        Hide,
+        HideOthers,
+        ShowAll,
+        Quit,
+        CloseWindow,
+        Minimize,
+        Zoom
+    ]
 );
 
 pub const USAGE_URL: &str = "https://chatgpt.com/settings/usage";

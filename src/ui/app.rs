@@ -17,7 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::settings::{open_about, open_usage_limit};
-use super::{About, NewChat, OpenSettings, Stop};
+use super::{About, DeleteChat, NewChat, NextChat, OpenSettings, PreviousChat, Stop};
 
 /// The window's root view. Owns the account, local data and every flow that talks to the network.
 pub struct Patina {
@@ -763,6 +763,30 @@ impl Patina {
         }
     }
 
+    /// Opens the chat above (`-1`) or below (`1`) the open one in the sidebar.
+    fn step_chat(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.signed_in() {
+            return;
+        }
+        let target = match self.chats.iter().position(|c| c.id == self.chat.id) {
+            Some(ix) => ix.checked_add_signed(step),
+            // A new chat isn't listed until it has a message; it sits above the first row.
+            None => (step > 0).then_some(0),
+        };
+        if let Some(chat) = target.and_then(|ix| self.chats.get(ix)) {
+            let id = chat.id.clone();
+            self.open_chat(&id, window, cx);
+        }
+    }
+
+    /// Asks before deleting the open chat; a new chat has nothing on disk to delete.
+    fn delete_open_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.signed_in() && self.chats.iter().any(|c| c.id == self.chat.id) {
+            let (id, title) = (self.chat.id.clone(), self.chat.title.clone());
+            self.confirm_delete(id, title, window, cx);
+        }
+    }
+
     pub(super) fn delete_chat(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.chat.id == id;
         if open {
@@ -796,6 +820,13 @@ impl Render for Patina {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.new_chat(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &DeleteChat, window, cx| this.delete_open_chat(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &PreviousChat, window, cx| this.step_chat(-1, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &NextChat, window, cx| this.step_chat(1, window, cx)))
             .on_action(cx.listener(|this, _: &Stop, window, cx| this.finish_reply(window, cx)))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),

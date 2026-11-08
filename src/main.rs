@@ -69,12 +69,24 @@ fn with_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
 fn bind_keys_and_menus(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-n", ui::NewChat, None),
+        // Not cmd-backspace: the composer uses that to delete to the line start.
+        KeyBinding::new("cmd-shift-backspace", ui::DeleteChat, None),
+        KeyBinding::new("ctrl-shift-tab", ui::PreviousChat, None),
+        KeyBinding::new("ctrl-tab", ui::NextChat, None),
         KeyBinding::new("escape", ui::Stop, None),
         KeyBinding::new("cmd-,", ui::OpenSettings, None),
+        KeyBinding::new("cmd-h", ui::Hide, None),
+        KeyBinding::new("alt-cmd-h", ui::HideOthers, None),
         KeyBinding::new("cmd-q", ui::Quit, None),
+        KeyBinding::new("cmd-w", ui::CloseWindow, None),
         KeyBinding::new("cmd-m", ui::Minimize, None),
     ]);
     cx.on_action(|_: &ui::Quit, cx| cx.quit());
+    cx.on_action(|_: &ui::Hide, cx| cx.hide());
+    cx.on_action(|_: &ui::HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ui::ShowAll, cx| cx.unhide_other_apps());
+    // Closing the only window quits, see `main`.
+    cx.on_action(|_: &ui::CloseWindow, cx| with_window(cx, |window| window.remove_window()));
     cx.on_action(|_: &ui::Minimize, cx| with_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &ui::Zoom, cx| with_window(cx, |window| window.zoom_window()));
 
@@ -84,9 +96,18 @@ fn bind_keys_and_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Settings…", ui::OpenSettings),
             MenuItem::separator(),
+            MenuItem::action("Hide Patina", ui::Hide),
+            MenuItem::action("Hide Others", ui::HideOthers),
+            MenuItem::action("Show All", ui::ShowAll),
+            MenuItem::separator(),
             MenuItem::action("Quit Patina", ui::Quit),
         ]),
-        Menu::new("File").items([MenuItem::action("New Chat", ui::NewChat)]),
+        Menu::new("File").items([
+            MenuItem::action("New Chat", ui::NewChat),
+            MenuItem::action("Delete Chat…", ui::DeleteChat),
+            MenuItem::separator(),
+            MenuItem::action("Close Window", ui::CloseWindow),
+        ]),
         Menu::new("Edit").items([
             MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
             MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
@@ -99,6 +120,9 @@ fn bind_keys_and_menus(cx: &mut App) {
         Menu::new("Window").items([
             MenuItem::action("Minimize", ui::Minimize),
             MenuItem::action("Zoom", ui::Zoom),
+            MenuItem::separator(),
+            MenuItem::action("Previous Chat", ui::PreviousChat),
+            MenuItem::action("Next Chat", ui::NextChat),
         ]),
     ]);
 }
