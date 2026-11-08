@@ -22,6 +22,11 @@ ureq = { version = "3.5.1", default-features = false, features = ["native-tls-no
 url = "2"
 uuid = { version = "1.29.1", features = ["v7"] }
 
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
 gpui-pre-platform = { opt-level = 3 }
